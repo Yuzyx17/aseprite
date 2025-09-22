@@ -1,0 +1,88 @@
+name: build-windows-only
+on: 
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [RelWithDebInfo, Debug]
+        ui: [gui, cli]
+        scripting: [lua, noscripts]
+        exclude:
+          - build_type: Debug
+            ui: gui
+          - build_type: RelWithDebInfo
+            ui: cli
+          - build_type: RelWithDebInfo
+            scripting: noscripts
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: Install Skia
+      if: ${{ matrix.ui == 'gui' }}
+      shell: bash
+      run: |
+        this_dir=$(cygpath "${{ github.workspace }}")
+        skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
+        skia_file=$(basename $skia_url)
+        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+        unzip "$skia_file" -d skia
+
+    - uses: aseprite/get-ninja@main
+
+    - uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Generating Makefiles
+      shell: bash
+      run: |
+        export enable_ccache=off
+        if [[ "${{ matrix.ui }}" == "gui" ]] ; then
+          export laf_backend=skia
+        else
+          export laf_backend=none
+        fi
+        if [[ "${{ matrix.scripting }}" == "lua" ]] ; then
+          export enable_scripting=on
+        else
+          export enable_scripting=off
+        fi
+        export skia_arch=x64
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DENABLE_TESTS=ON \
+          -DENABLE_SCRIPTING=$enable_scripting \
+          -DENABLE_CCACHE=$enable_ccache \
+          -DLAF_BACKEND=$laf_backend \
+          -DSKIA_DIR=$(realpath skia) \
+          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+
+    - name: Compiling
+      shell: bash
+      run: |
+        cd build && ninja
+
+    - name: Running C++ Tests
+      shell: bash
+      run: |
+        cd build && ctest --output-on-failure
+
+    - name: Running CLI Tests
+      if: ${{ matrix.scripting == 'lua' }}
+      shell: bash
+      run: |
+        export ASEPRITE=$PWD/build/bin/aseprite
+        cd tests
+        bash run-tests.sh
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-windows-${{ matrix.build_type }}-${{ matrix.ui }}-${{ matrix.scripting }}
+        path: |
+          build/bin/*
